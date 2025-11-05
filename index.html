@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Fixa — Ремонт и Здоровье</title>
+  <meta name="description" content="Автономное приложение для учёта техники и здоровья семьи. Без интернета. Без данных в облаке.">
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192x192.png" />
+  <meta name="theme-color" content="#1a73e8" />
+
+  <!-- Service Worker для offline -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(reg => console.log('✅ SW зарегистрирован:', reg.scope))
+          .catch(err => console.warn('⚠️ Ошибка SW:', err));
+      });
+    }
+  </script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { background: #f8fafc; color: #1e293b; padding: 16px; max-width: 800px; margin: 0 auto; }
+    header { text-align: center; margin: 20px 0; }
+    h1 { font-size: 28px; color: #1d4ed8; margin: 10px 0; }
+    #count { font-size: 16px; color: #64748b; margin-top: 8px; }
+    nav { display: grid; gap: 12px; margin: 20px 0; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+    button { padding: 14px; font-size: 16px; border: none; border-radius: 12px; background: #1d4ed8; color: white; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #1e40af; }
+    button:active { transform: scale(0.98); }
+    #content { margin-top: 20px; }
+    .card { background: white; padding: 16px; border-radius: 14px; margin-bottom: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); border: 1px solid #e2e8f0; position: relative; }
+    .delete-btn { position: absolute; top: 10px; right: 10px; background: #ef4444; color: white; border: none; width: 28px; height: 28px; border-radius: 50%; font-size: 14px; cursor: pointer; }
+    .hidden { display: none; }
+    #form-container { margin-top: 20px; background: white; padding: 20px; border-radius: 14px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+    input, textarea, select { width: 100%; padding: 14px; margin: 10px 0; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 16px; }
+    input:focus, textarea:focus, select:focus { outline: 2px solid #3b82f6; }
+    img.preview { max-width: 100%; margin-top: 10px; border-radius: 8px; }
+    .error { color: #ef4444; margin: 10px 0; padding: 10px; background: #fef2f2; border-radius: 8px; }
+    footer { text-align: center; margin-top: 30px; color: #94a3b8; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Fixa</h1>
+    <p id="count">Загрузка...</p>
+  </header>
+
+  <nav>
+    <button id="add-appliance">🔧 Добавить технику</button>
+    <button id="add-health">❤️ Здоровье семьи</button>
+    <button id="export-pdf">📄 Экспорт в PDF</button>
+    <button id="export-json">💾 Экспорт в JSON</button>
+    <button id="import-json">📥 Импорт из JSON</button>
+    <button id="print">🖨️ Печать</button>
+    <button id="scan-qr">📷 Сканировать QR</button>
+    <button id="dictate">🎤 Диктовка</button>
+  </nav>
+
+  <div id="form-container" class="hidden"></div>
+
+  <div id="content">
+    <h3>Техника</h3>
+    <div id="list-appliances"></div>
+    <h3>Здоровье</h3>
+    <div id="list-health"></div>
+  </div>
+
+  <footer>
+    Данные хранятся только на этом устройстве • Без интернета • Без облака
+  </footer>
+
+  <!-- ВСТРОЕННЫЕ БИБЛИОТЕКИ (без внешних запросов!) -->
+  <script id="jspdf-src">
+    // Minified jsPDF (2.5.1) — встроено для offline-работы
+    !function(t,e){"object"==typeof exports&&"undefined"!=typeof module?module.exports=e():"function"==typeof define&&define.amd?define(e):(t="undefined"!=typeof globalThis?globalThis:t||self).jsPDF=e()}(this,function(){...
+    // ⚠️ ПОЛНЫЙ КОД jsPDF и html5-qrcode УБРАН ДЛЯ КРАТКОСТИ — ВНИЗУ Я ПРИШЛЮ ССЫЛКУ НА ZIP
+  </script>
+
+  <script>
+    // ======================
+    // === ВСЁ ОСТАЛЬНОЕ JS ===
+    // (точно как у вас, но с импортом и печатью)
+    // ======================
+    const Storage = {
+      save(type, item) {
+        const items = this.load(type);
+        item.id = Date.now();
+        item.date = new Date().toISOString();
+        items.push(item);
+        localStorage.setItem(`fixa_${type}`, JSON.stringify(items));
+        return item;
+      },
+      load(type) { return JSON.parse(localStorage.getItem(`fixa_${type}`) || '[]'); },
+      remove(type, id) {
+        const items = this.load(type).filter(i => i.id !== id);
+        localStorage.setItem(`fixa_${type}`, JSON.stringify(items));
+      },
+      getAll() {
+        return { appliances: this.load('appliances'), health: this.load('health') };
+      }
+    };
+
+    const UI = {
+      formatDate(iso) {
+        return new Date(iso).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+      },
+      escape(str) { return str.replace(/[&<>"']/g, m => ({ '&':'&amp;', '<':'<', '>':'>', '"':'&quot;', "'":'&#039;' }[m])); },
+      renderCount() {
+        const a = Storage.load('appliances'), h = Storage.load('health');
+        document.getElementById('count').innerText = `Техника: ${a.length} | Здоровье: ${h.length}`;
+      },
+      renderList() {
+        const render = (type, items, format) => items.map(i =>
+          `<div class="card">
+            <button class="delete-btn" data-type="${type}" data-id="${i.id}">×</button>
+            ${format(i)}
+            <br><small>${this.formatDate(i.date)}</small>
+          </div>`
+        ).join('');
+
+        document.getElementById('list-appliances').innerHTML = render(
+          'appliances',
+          Storage.load('appliances'),
+          a => `<strong>${this.escape(a.model)}</strong> (${this.escape(a.category)})${a.problem ? '<br><em>Проблема:</em> ' + this.escape(a.problem) : ''}${a.photo ? `<br><img src="${a.photo}" class="preview">` : ''}`
+        );
+
+        document.getElementById('list-health').innerHTML = render(
+          'health',
+          Storage.load('health'),
+          h => `<strong>${this.escape(h.symptom)}</strong>${h.notes ? '<br>' + this.escape(h.notes) : ''}`
+        );
+
+        document.querySelectorAll('.delete-btn').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const type = e.target.dataset.type, id = Number(e.target.dataset.id);
+            if (confirm('Удалить запись?')) {
+              Storage.remove(type, id);
+              this.renderList(); this.renderCount();
+            }
+          });
+        });
+      },
+      showForm(type) {
+        const c = document.getElementById('form-container');
+        if (type === 'appliance') {
+          c.innerHTML = `
+            <h3>Добавить технику</h3>
+            <input type="text" id="model" placeholder="Модель (Bosch WAT28460BY)" />
+            <select id="category">
+              <option value="">— Категория —</option>
+              <option value="Стиральная машина">Стиральная машина</option>
+              <option value="Холодильник">Холодильник</option>
+              <option value="Плита">Плита</option>
+              <option value="Духовка">Духовка</option>
+              <option value="Посудомойка">Посудомойка</option>
+            </select>
+            <textarea id="problem" placeholder="Описание проблемы"></textarea>
+            <input type="file" id="photo" accept="image/*" capture="environment">
+            <img id="photo-preview" class="preview hidden">
+            <div style="display:flex;gap:10px;margin-top:10px;">
+              <button id="save-appliance">✅ Сохранить</button>
+              <button id="cancel">❌ Отмена</button>
+            </div>
+          `;
+          this.initPhotoPreview();
+          document.getElementById('save-appliance').onclick = () => this.saveAppliance();
+        } else {
+          c.innerHTML = `
+            <h3>Запись о здоровье</h3>
+            <input type="text" id="symptom" placeholder="Симптом" />
+            <textarea id="notes" placeholder="Примечания, лечение"></textarea>
+            <div style="display:flex;gap:10px;margin-top:10px;">
+              <button id="save-health">✅ Сохранить</button>
+              <button id="cancel">❌ Отмена</button>
+            </div>
+          `;
+          document.getElementById('save-health').onclick = () => this.saveHealth();
+        }
+        c.classList.remove('hidden');
+        document.getElementById('cancel').onclick = () => c.classList.add('hidden');
+      },
+      initPhotoPreview() {
+        const input = document.getElementById('photo'), preview = document.getElementById('photo-preview');
+        input.onchange = (e) => {
+          const file = e.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = ev => { preview.src = ev.target.result; preview.classList.remove('hidden'); };
+            reader.readAsDataURL(file);
+          }
+        };
+      },
+      saveAppliance() {
+        const model = document.getElementById('model').value.trim();
+        const category = document.getElementById('category').value;
+        if (!model || !category) { alert('Заполните модель и категорию'); return; }
+        let photo = '';
+        const preview = document.getElementById('photo-preview');
+        if (!preview.classList.contains('hidden')) photo = preview.src;
+        Storage.save('appliances', { model, category, problem: document.getElementById('problem').value, photo });
+        this.renderList(); this.renderCount();
+        document.getElementById('form-container').classList.add('hidden');
+      },
+      saveHealth() {
+        const symptom = document.getElementById('symptom').value.trim();
+        if (!symptom) { alert('Укажите симптом'); return; }
+        Storage.save('health', { symptom, notes: document.getElementById('notes').value });
+        this.renderList(); this.renderCount();
+        document.getElementById('form-container').classList.add('hidden');
+      },
+      exportPDF() {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF();
+        doc.setFontSize(20); doc.text('Отчёт Fixa', 20, 20); let y = 30;
+        const add = (title, items, fmt) => {
+          doc.setFontSize(14); doc.text(title, 20, y); y += 10;
+          items.forEach(i => {
+            let lines = doc.splitTextToSize(fmt(i), 170);
+            lines.forEach(line => { if (y > 280) { doc.addPage(); y = 20; } doc.text(line, 20, y); y += 7; });
+            y += 5;
+          });
+        };
+        add('Техника', Storage.load('appliances'), a => `Модель: ${a.model}\nКатегория: ${a.category}\nПроблема: ${a.problem || '-'}\nДата: ${this.formatDate(a.date)}`);
+        add('Здоровье', Storage.load('health'), h => `Симптом: ${h.symptom}\nПримечания: ${h.notes || '-'}\nДата: ${this.formatDate(h.date)}`);
+        doc.save(`fixa_${new Date().toISOString().slice(0,10)}.pdf`);
+      },
+      exportJSON() {
+        const blob = new Blob([JSON.stringify(Storage.getAll(), null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = `fixa_${new Date().toISOString().slice(0,10)}.json`; a.click();
+        URL.revokeObjectURL(url);
+      },
+      importJSON() {
+        const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
+        input.onchange = (e) => {
+          const reader = new FileReader();
+          reader.onload = ev => {
+            try {
+              const data = JSON.parse(ev.target.result);
+              if (data.appliances) localStorage.setItem('fixa_appliances', JSON.stringify(data.appliances));
+              if (data.health) localStorage.setItem('fixa_health', JSON.stringify(data.health));
+              this.renderList(); this.renderCount();
+              alert('✅ Данные импортированы!');
+            } catch (err) { alert('❌ Ошибка при импорте JSON'); }
+          };
+          reader.readAsText(e.target.files[0]);
+        };
+        input.click();
+      },
+      print() {
+        const w = window.open('', '_blank');
+        w.document.write(`
+          <html><head><title>Fixa — печать</title><style>body{font-family:sans-serif;padding:20px;}</style></head><body>
+          <h2>Техника</h2>${document.getElementById('list-appliances').innerHTML}
+          <h2>Здоровье</h2>${document.getElementById('list-health').innerHTML}
+          </body></html>
+        `);
+        w.document.close(); w.focus(); w.print(); w.close();
+      },
+      initQRScanner() {
+        alert('QR-сканер требует локального сервера для полной работы. В GitHub Pages используйте "Загрузить фото с QR".');
+        const input = document.createElement('input');
+        input.type = 'file'; input.accept = 'image/*';
+        input.onchange = (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          // Здесь можно добавить библиотеку позже, но для GitHub Pages — только через файл
+          alert('Чтобы распознать QR, сохраните изображение и используйте отдельное приложение.');
+        };
+        input.click();
+      }
+    };
+
+    document.addEventListener('DOMContentLoaded', () => {
+      UI.renderCount(); UI.renderList();
+      document.getElementById('add-appliance').onclick = () => UI.showForm('appliance');
+      document.getElementById('add-health').onclick = () => UI.showForm('health');
+      document.getElementById('export-pdf').onclick = () => UI.exportPDF();
+      document.getElementById('export-json').onclick = () => UI.exportJSON();
+      document.getElementById('import-json').onclick = () => UI.importJSON();
+      document.getElementById('print').onclick = () => UI.print();
+      document.getElementById('scan-qr').onclick = () => UI.initQRScanner();
+      document.getElementById('dictate').onclick = () => {
+        alert('На iOS: нажмите на текстовое поле → микрофон на клавиатуре → диктуйте.');
+      };
+    });
+  </script>
+</body>
+</html>
